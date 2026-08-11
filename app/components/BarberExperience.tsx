@@ -189,37 +189,9 @@ function useRoomTone(place: Place, enabled: boolean) {
     if (ctx.state === "suspended") void ctx.resume();
 
     const master = ctx.createGain();
-    const filter = ctx.createBiquadFilter();
-    filter.type = "lowpass";
-    filter.frequency.value = place.tone;
-    filter.Q.value = 0.6;
     master.gain.setValueAtTime(0, ctx.currentTime);
     master.gain.linearRampToValueAtTime(0.055, ctx.currentTime + 1.2);
-    filter.connect(master).connect(ctx.destination);
-
-    const buffer = ctx.createBuffer(1, ctx.sampleRate * 4, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    let seed = place.id.charCodeAt(0) * 1009 + place.id.charCodeAt(1);
-    let last = 0;
-    for (let i = 0; i < data.length; i++) {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      const white = (seed / 4294967295) * 2 - 1;
-      last = last * 0.985 + white * 0.015;
-      data[i] = last * 2.7;
-    }
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.loop = true;
-    source.connect(filter);
-
-    const oscillator = ctx.createOscillator();
-    const bed = ctx.createGain();
-    oscillator.type = "sine";
-    oscillator.frequency.value = 48;
-    bed.gain.value = 0.012;
-    oscillator.connect(bed).connect(master);
-    source.start();
-    oscillator.start();
+    master.connect(ctx.destination);
 
     // Continuous organic barber haircutting rhythm sequence
     let cancelled = false;
@@ -256,8 +228,6 @@ function useRoomTone(place: Place, enabled: boolean) {
       master.gain.cancelScheduledValues(ctx.currentTime);
       master.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
       window.setTimeout(() => {
-        try { source.stop(); } catch { /* ignore */ }
-        try { oscillator.stop(); } catch { /* ignore */ }
         void ctx.close();
       }, 220);
     };
@@ -1152,7 +1122,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange }: De
             aria-label={playing ? "रोकें" : "चलाएँ"}
             data-playing={playing}
           >
-            <span style={{ backgroundImage: `url(${theme.image})` }} />
+            <span style={{ backgroundImage: `url(${videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : theme.image})` }} />
           </button>
 
           <div className="radio-mid">
@@ -1575,59 +1545,53 @@ export function BarberExperience({ place }: { place: Place }) {
       />
       <div className="place-scrim" aria-hidden="true" />
       <WeatherLayer weather={weather} flash={lightning} />
-      <div className="place-life" aria-hidden="true">
-        <span className="life-dust" />
-        <span className="life-dust life-dust-b" />
-        <span className="life-scissors" title="कैंची">✂</span>
-      </div>
+
 
       <header className="place-top">
         <LiveClock />
         <div className={`lang-switch ${menuOpen ? "is-open" : ""}`} role="tablist" aria-label="भाषा चुनें" onMouseLeave={() => setMenuOpen(false)}>
           <button
             type="button"
-            className="place-pill lang-pill is-active menu-trigger"
+            className="mobile-hamburger-trigger place-pill"
             onClick={() => setMenuOpen(!menuOpen)}
           >
-            <span className="hamburger-icon-wrapper"><HamburgerIcon /></span>
+            <HamburgerIcon />
             <span>{STATIONS.find(s => s.id === station)?.label}</span>
           </button>
           
-          {menuOpen && (
-            <div className="lang-dropdown-menu">
-              {STATIONS.map((entry) => {
-                if (entry.id === station) return null;
-                return (
-                  <div key={entry.id} className="lang-pill-wrapper">
-                    <button
-                      type="button"
-                      role="tab"
-                      className="place-pill lang-pill menu-item"
-                      onClick={() => {
-                        setStation(entry.id);
-                        setMenuOpen(false);
-                      }}
-                    >
-                      <span>{entry.label}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="lang-speaker-icon"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        speakDialogue(entry.id);
-                        setMenuOpen(false);
-                      }}
-                      title={`${entry.label} सैलून संवाद बोलें`}
-                      aria-label={`${entry.label} सैलून संवाद बोलें`}
-                    >
-                      <SpeakerIcon />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <div className="lang-switch-list">
+            {STATIONS.map((entry) => {
+              const isActive = station === entry.id;
+              return (
+                <div key={entry.id} className={`lang-pill-wrapper${isActive ? " is-active" : ""}`}>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`place-pill lang-pill${isActive ? " is-active" : ""}`}
+                    onClick={() => {
+                      setStation(entry.id);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <span>{entry.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="lang-speaker-icon"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      speakDialogue(entry.id);
+                    }}
+                    title={`${entry.label} सैलून संवाद बोलें`}
+                    aria-label={`${entry.label} सैलून संवाद बोलें`}
+                  >
+                    <SpeakerIcon />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </div>
         <div className="place-nav">
           <a className="place-pill" href={place.playlist.spotifyUrl} target="_blank" rel="noreferrer">
@@ -1685,7 +1649,7 @@ export function BarberExperience({ place }: { place: Place }) {
               </button>
             ))}
           </div>
-          <button className="extra-chip" type="button" onClick={() => void toggleFullscreen()}>
+          <button className="extra-chip fullscreen-chip" type="button" onClick={() => void toggleFullscreen()}>
             <ExpandIcon />
             {fullscreen ? "Exit" : "Fullscreen"}
           </button>
