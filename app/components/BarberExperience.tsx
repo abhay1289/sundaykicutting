@@ -1205,15 +1205,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange }: De
             <button type="button" onClick={() => setShowSearch(true)} aria-label="गाना खोजें">
               <SearchIcon />
             </button>
-            <button
-              type="button"
-              onClick={() => setShowLyrics((open) => !open)}
-              aria-pressed={showLyrics}
-              aria-label={showLyrics ? "बोल छुपाएँ" : "बोल दिखाएँ"}
-              disabled={!hasLyrics}
-            >
-              <LyricsIcon />
-            </button>
+
             <button
               type="button"
               onClick={toggleMute}

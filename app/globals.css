@@ -1938,9 +1938,10 @@ button.place-pill.lang-pill:hover {
   background-position: center;
   background-size: cover;
   display: block;
-  filter: sepia(0.2);
+  filter: sepia(0.15);
   height: 100%;
   width: 100%;
+  transform: scale(1.35);
 }
 
 .radio-avatar[data-playing="true"] span {
