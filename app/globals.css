@@ -1594,6 +1594,7 @@ button.place-pill.lang-pill:hover {
 .place-shell.is-revealed .radio { opacity: 1; transform: translateY(0); }
 
 .radio-long .radio-avatar {
+  align-self: center;
   border-width: 1.5px;
   flex-shrink: 0;
   height: 3.85rem;
