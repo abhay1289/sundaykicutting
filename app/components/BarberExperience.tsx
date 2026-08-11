@@ -1495,7 +1495,7 @@ export function BarberExperience({ place }: { place: Place }) {
     window.setTimeout(() => setLightning(false), 450);
   }, []);
 
-  useRoomTone(place, true);
+  useRoomTone(place, false);
   useWeatherTone(weather, handleThunder);
 
   useEffect(() => {
