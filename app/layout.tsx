@@ -9,8 +9,22 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl()),
   title: { default: title, template: `%s | ${SITE_NAME}` },
   description: SITE_DESCRIPTION,
+  keywords: [
+    "Sunday Ki Cutting",
+    "90s Indian Nostalgia",
+    "Deluxe Salon",
+    "Old Barber Shop Radio",
+    "90s Hindi Songs",
+    "Retro India",
+    "Bhojpuri Salon Radio",
+    "Punjabi Salon Radio",
+    "90s Nostalgia Experience"
+  ],
   applicationName: SITE_NAME,
   manifest: "/manifest.webmanifest",
+  alternates: {
+    canonical: siteUrl(),
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -30,7 +44,7 @@ export const metadata: Metadata = {
     description: SITE_DESCRIPTION,
     type: "website",
     siteName: SITE_NAME,
-    url: "/",
+    url: siteUrl(),
     images: [{ url: "/images/wallpapers/01-old-barber-shop.jpg", width: 1600, height: 900, alt: title }],
   },
   twitter: {
