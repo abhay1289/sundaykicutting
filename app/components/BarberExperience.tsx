@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { type Place } from "../place";
 import { rememberTrack } from "../listening";
 import { activeLyricIndex, scaleLinesToDuration, type BarberTrack, type LyricLine } from "../barber-tracks";
@@ -9,6 +9,66 @@ import { SongSearch } from "./SongSearch";
 import { STATIONS, tracksForStation, type StationId } from "../stations";
 import { LANG_THEMES, themeToCssVars } from "../themes";
 import { WEATHERS, type WeatherId } from "../scene-moods";
+
+class PlayerErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; retryCount: number }
+> {
+  state = { hasError: false, retryCount: 0 };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    // eslint-disable-next-line no-console
+    console.warn("[Salon] Component crash caught:", error.message);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#1a110c",
+            color: "#f3e6c8",
+            fontFamily: "inherit",
+            gap: "1rem",
+            padding: "2rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ fontSize: "1.2rem" }}>कुछ गड़बड़ हो गई — रीलोड करें</p>
+          <button
+            type="button"
+            onClick={() => {
+              this.setState((s) => ({ hasError: false, retryCount: s.retryCount + 1 }));
+            }}
+            style={{
+              background: "#f3e6c8",
+              color: "#1a110c",
+              border: "none",
+              borderRadius: "2rem",
+              padding: "0.6rem 1.8rem",
+              fontWeight: 600,
+              fontSize: "1rem",
+              cursor: "pointer",
+            }}
+          >
+            फिर से चलाएँ
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 type YouTubePlayer = {
   playVideo(): void;
@@ -77,28 +137,50 @@ declare global {
 
 let apiPromise: Promise<YouTubeApi> | null = null;
 
-function loadYouTubeApi(): Promise<YouTubeApi> {
+function loadYouTubeApi(attempt = 0): Promise<YouTubeApi> {
   if (window.YT?.Player) return Promise.resolve(window.YT);
   if (!apiPromise) {
     apiPromise = new Promise<YouTubeApi>((resolve, reject) => {
+      let settled = false;
       const previous = window.onYouTubeIframeAPIReady;
       window.onYouTubeIframeAPIReady = () => {
         previous?.();
+        if (settled) return;
+        settled = true;
         if (window.YT?.Player) resolve(window.YT);
         else reject(new Error("YouTube iframe API loaded without a player"));
       };
-      const script = document.createElement("script");
-      script.src = "https://www.youtube.com/iframe_api";
-      script.async = true;
-      script.onerror = () => reject(new Error("YouTube iframe API blocked"));
-      document.head.appendChild(script);
-      window.setTimeout(() => reject(new Error("YouTube iframe API timed out")), 12000);
+      const existing = document.querySelector('script[src*="youtube.com/iframe_api"]');
+      if (!existing) {
+        const script = document.createElement("script");
+        script.src = "https://www.youtube.com/iframe_api";
+        script.async = true;
+        script.onerror = () => {
+          if (settled) return;
+          settled = true;
+          reject(new Error("YouTube iframe API blocked"));
+        };
+        document.head.appendChild(script);
+      }
+      window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("YouTube iframe API timed out"));
+      }, 15000);
     });
     apiPromise.catch(() => {
       apiPromise = null;
     });
   }
-  return apiPromise;
+  return apiPromise.catch((err) => {
+    if (attempt < 3) {
+      apiPromise = null;
+      return new Promise<YouTubeApi>((res) =>
+        window.setTimeout(() => res(loadYouTubeApi(attempt + 1)), 2000 * (attempt + 1)),
+      );
+    }
+    throw err;
+  });
 }
 
 /**
@@ -360,10 +442,19 @@ function useWeatherTone(weather: WeatherId, onThunder?: () => void) {
   }, [weather, onThunder]);
 }
 
+let sharedStaticCtx: AudioContext | null = null;
+function getSharedAudioCtx(): AudioContext {
+  if (!sharedStaticCtx || sharedStaticCtx.state === "closed") {
+    sharedStaticCtx = new AudioContext();
+  }
+  if (sharedStaticCtx.state === "suspended") void sharedStaticCtx.resume();
+  return sharedStaticCtx;
+}
+
 /** Synthesize a short radio dial tuning crackle (0.35s). */
 function playRadioStatic() {
   try {
-    const ctx = new AudioContext();
+    const ctx = getSharedAudioCtx();
     const t = ctx.currentTime;
     const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.35), ctx.sampleRate);
     const data = buf.getChannelData(0);
@@ -386,7 +477,6 @@ function playRadioStatic() {
     src.connect(filter).connect(gain).connect(ctx.destination);
     src.start(t);
     src.stop(t + 0.35);
-    window.setTimeout(() => void ctx.close(), 400);
   } catch {
     /* ignored */
   }
@@ -398,21 +488,33 @@ function RainCanvas() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
     let animId: number;
-    let width = (canvas.width = window.innerWidth);
-    let height = (canvas.height = window.innerHeight);
+    let disposed = false;
 
+    // Use CSS pixels, cap canvas resolution for performance on 4K/retina
+    const maxDim = 1920;
+    let width = (canvas.width = Math.min(window.innerWidth, maxDim));
+    let height = (canvas.height = Math.min(window.innerHeight, maxDim));
+
+    let resizeTimer = 0;
     const handleResize = () => {
-      if (!canvas) return;
-      width = canvas.width = window.innerWidth;
-      height = canvas.height = window.innerHeight;
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        if (disposed || !canvas) return;
+        width = canvas.width = Math.min(window.innerWidth, maxDim);
+        height = canvas.height = Math.min(window.innerHeight, maxDim);
+      }, 200);
     };
     window.addEventListener("resize", handleResize);
 
-    const dropCount = Math.min(Math.floor((width * height) / 6500), 240);
+    // Reduce particle count on low-end devices (< 4 cores or low memory)
+    const isLowEnd = (navigator.hardwareConcurrency ?? 4) <= 2;
+    const dropCap = isLowEnd ? 80 : 180;
+
+    const dropCount = Math.min(Math.floor((width * height) / 8000), dropCap);
     const drops = Array.from({ length: dropCount }, () => ({
       x: Math.random() * width * 1.25 - width * 0.1,
       y: Math.random() * height,
@@ -422,7 +524,7 @@ function RainCanvas() {
       opacity: Math.random() * 0.48 + 0.25,
     }));
 
-    const glassDropCount = Math.min(Math.floor(width / 20), 75);
+    const glassDropCount = Math.min(Math.floor(width / 28), isLowEnd ? 25 : 50);
     const glassDrops = Array.from({ length: glassDropCount }, () => ({
       x: Math.random() * width,
       y: Math.random() * height,
@@ -431,6 +533,7 @@ function RainCanvas() {
       trail: [] as { y: number; r: number }[],
     }));
 
+    const MAX_SPLASHES = 30;
     const splashes: { x: number; y: number; r: number; maxR: number; alpha: number }[] = [];
 
     const draw = () => {
@@ -457,7 +560,7 @@ function RainCanvas() {
         drop.y += drop.speed;
 
         if (drop.y > height) {
-          if (Math.random() < 0.38) {
+          if (Math.random() < 0.38 && splashes.length < MAX_SPLASHES) {
             splashes.push({
               x: drop.x,
               y: height - Math.random() * 22,
@@ -523,7 +626,9 @@ function RainCanvas() {
     draw();
 
     return () => {
+      disposed = true;
       window.removeEventListener("resize", handleResize);
+      window.clearTimeout(resizeTimer);
       cancelAnimationFrame(animId);
     };
   }, []);
@@ -757,6 +862,8 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const mutedRef = useRef(muted);
+  const userPausedRef = useRef(false);
+  const lastActionRef = useRef(0);
 
   const queue = useMemo(() => tracksForStation(station), [station]);
   const queueVideos = useMemo(() => queue.map((entry) => entry.id), [queue]);
@@ -807,12 +914,22 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     if (!stationBooted.current) {
       stationBooted.current = true;
       player.playVideo?.();
+      // Fallback: if autoplay was blocked, nudge again after delay
+      window.setTimeout(() => {
+        const p = live(playerRef.current);
+        if (!p) return;
+        try {
+          const s = p.getPlayerState?.();
+          if (s === -1 || s === 5) p.playVideo?.();
+        } catch { /* ignore */ }
+      }, 1500);
       return;
     }
     
     const videos = videosRef.current;
     if (!videos.length) return;
     
+    userPausedRef.current = false;
     setElapsed(0);
     setScrub(null);
     setDuration(0);
@@ -822,6 +939,12 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       player.loadPlaylist?.(videos, 0, 0);
       setVideoId(videos[0] ?? "");
       setPosition({ index: 1, total: videos.length });
+      // Ensure playback starts after loadPlaylist
+      window.setTimeout(() => {
+        const p = live(playerRef.current);
+        if (!p) return;
+        try { p.playVideo?.(); } catch { /* ignore */ }
+      }, 800);
     } catch {
       /* ignore */
     }
@@ -830,6 +953,8 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   useEffect(() => {
     let disposed = false;
     let player: YouTubePlayer | null = null;
+    let resumeTimer = 0;
+    let watchdogTimer = 0;
     const wrapper = hostRef.current;
 
     const deepLink = readDeepLink();
@@ -865,6 +990,52 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
         wrapper.appendChild(mount);
 
         let errorCount = 0;
+        let userInitiatedPlay = false;
+        let lastPlayingAt = 0;
+
+        const tryResume = (target: YouTubePlayer) => {
+          if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+          try {
+            const state = target.getPlayerState?.();
+            if (state === api.PlayerState.PAUSED || state === api.PlayerState.ENDED || state === -1 || state === 5) {
+              if (state === api.PlayerState.ENDED) {
+                target.nextVideo?.();
+              } else {
+                target.playVideo?.();
+              }
+            }
+          } catch { /* player destroyed */ }
+        };
+
+        const startWatchdog = (target: YouTubePlayer) => {
+          window.clearInterval(watchdogTimer);
+          watchdogTimer = window.setInterval(() => {
+            if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+
+            // Check if iframe is still in the DOM (crash/gc protection)
+            const iframe = wrapper?.querySelector("iframe");
+            if (!iframe || !iframe.isConnected) {
+              // Iframe destroyed — trigger full re-mount by resetting status
+              if (!disposed) {
+                window.clearInterval(watchdogTimer);
+                playerRef.current = null;
+                setStatus("loading");
+              }
+              return;
+            }
+
+            try {
+              const state = target.getPlayerState?.();
+              if (state === api.PlayerState.PLAYING || state === api.PlayerState.BUFFERING) {
+                lastPlayingAt = Date.now();
+                return;
+              }
+              if (Date.now() - lastPlayingAt > 8000) {
+                tryResume(target);
+              }
+            } catch { /* destroyed */ }
+          }, 4000);
+        };
 
         player = new api.Player(mount, {
           host: "https://www.youtube.com",
@@ -888,7 +1059,6 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               if (mutedRef.current) event.target.mute();
 
               try {
-                // Cue a custom queue of video IDs (official YT overload).
                 event.target.cuePlaylist?.(videos, startIndex, deepLink.start);
               } catch {
                 /* ignore */
@@ -897,12 +1067,48 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               setVideoId(videos[startIndex] ?? "");
               setStatus("ready");
               readTrack(event.target);
+              startWatchdog(event.target);
+
+              // Resume on visibility change (mobile tab switch / lock screen)
+              const handleVisibility = () => {
+                if (disposed || userPausedRef.current) return;
+                if (document.visibilityState === "visible" && userInitiatedPlay) {
+                  window.clearTimeout(resumeTimer);
+                  resumeTimer = window.setTimeout(() => tryResume(event.target), 600);
+                }
+              };
+              document.addEventListener("visibilitychange", handleVisibility);
+
+              // Resume on network reconnect
+              const handleOnline = () => {
+                if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+                window.clearTimeout(resumeTimer);
+                resumeTimer = window.setTimeout(() => tryResume(event.target), 1200);
+              };
+              window.addEventListener("online", handleOnline);
+
+              // Audio focus: resume when another app releases audio
+              const handleFocus = () => {
+                if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+                window.clearTimeout(resumeTimer);
+                resumeTimer = window.setTimeout(() => tryResume(event.target), 800);
+              };
+              window.addEventListener("focus", handleFocus);
             },
             onStateChange: (event) => {
               if (disposed) return;
               const state = event.data;
               setPlaying(state === api.PlayerState.PLAYING);
               setBuffering(state === api.PlayerState.BUFFERING);
+
+              if (state === api.PlayerState.PLAYING) {
+                userInitiatedPlay = true;
+                lastPlayingAt = Date.now();
+                errorCount = 0;
+                const d = event.target.getDuration();
+                if (d > 0) setDuration(d);
+              }
+
               if (
                 state === api.PlayerState.PLAYING ||
                 state === api.PlayerState.CUED ||
@@ -912,33 +1118,76 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
                 const t = event.target.getCurrentTime();
                 setElapsed(t);
               }
-              if (state === api.PlayerState.PLAYING) {
-                const d = event.target.getDuration();
-                if (d > 0) setDuration(d);
+
+              // Auto-advance when a track ends
+              if (state === api.PlayerState.ENDED && userInitiatedPlay) {
+                window.clearTimeout(resumeTimer);
+                resumeTimer = window.setTimeout(() => {
+                  if (disposed) return;
+                  try { event.target.nextVideo?.(); } catch { /* ignore */ }
+                }, 400);
+              }
+
+              // Auto-resume if paused unexpectedly (not by user toggle)
+              if (state === api.PlayerState.PAUSED && userInitiatedPlay && !userPausedRef.current) {
+                window.clearTimeout(resumeTimer);
+                resumeTimer = window.setTimeout(() => tryResume(event.target), 3000);
               }
             },
             onError: (event) => {
               if (disposed) return;
               errorCount++;
-              if (errorCount > 3) {
-                setStatus("unavailable");
-              } else {
+              if (errorCount > 8) {
                 try {
-                  event.target.nextVideo();
+                  const randomIdx = Math.floor(Math.random() * videos.length);
+                  event.target.loadPlaylist?.(videos, randomIdx, 0);
+                  errorCount = 0;
+                  window.setTimeout(() => {
+                    if (disposed) return;
+                    try { event.target.playVideo?.(); } catch { /* ignore */ }
+                  }, 1000);
                 } catch {
                   setStatus("unavailable");
                 }
+              } else {
+                window.clearTimeout(resumeTimer);
+                resumeTimer = window.setTimeout(() => {
+                  if (disposed) return;
+                  try {
+                    event.target.nextVideo?.();
+                    window.setTimeout(() => {
+                      if (disposed) return;
+                      try { event.target.playVideo?.(); } catch { /* ignore */ }
+                    }, 600);
+                  } catch { /* ignore */ }
+                }, 800 + errorCount * 400);
               }
             },
           },
         });
       })
       .catch(() => {
-        if (!disposed) setStatus("unavailable");
+        if (disposed) return;
+        // Show unavailable but retry once user comes back online or after delay
+        setStatus("unavailable");
+        const retryDelay = window.setTimeout(() => {
+          if (disposed) return;
+          apiPromise = null;
+          setStatus("loading");
+        }, 8000);
+        const retryOnline = () => {
+          if (disposed) return;
+          window.clearTimeout(retryDelay);
+          apiPromise = null;
+          setStatus("loading");
+        };
+        window.addEventListener("online", retryOnline, { once: true });
       });
 
     return () => {
       disposed = true;
+      window.clearTimeout(resumeTimer);
+      window.clearInterval(watchdogTimer);
       playerRef.current = null;
       try {
         player?.destroy();
@@ -968,31 +1217,51 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   };
 
   const toggle = useCallback(() => {
+    const now = Date.now();
+    if (now - lastActionRef.current < 300) return;
+    lastActionRef.current = now;
+
     const player = live(playerRef.current);
-    if (!player) return;
+
+    // If player isn't ready yet, try raw access (some devices report ready but live() fails)
+    const raw = player || playerRef.current;
+    if (!raw) return;
+
     if (playing) {
-      player.pauseVideo();
+      userPausedRef.current = true;
+      try { raw.pauseVideo?.(); } catch { /* ignore */ }
     } else {
-      if (muted) {
-        player.mute();
-      } else {
-        player.unMute();
-      }
+      userPausedRef.current = false;
       try {
-        const state = player.getPlayerState?.();
-        if (state === -1 || state === 5 || state === undefined) {
-          player.playVideoAt?.(0);
+        if (muted) { raw.mute?.(); } else { raw.unMute?.(); }
+      } catch { /* ignore */ }
+      try {
+        const state = raw.getPlayerState?.();
+        if (state === -1 || state === 5 || state === 0 || state === undefined) {
+          raw.playVideoAt?.(0);
         }
-        player.playVideo();
+        raw.playVideo?.();
       } catch {
-        player.playVideo();
+        try { raw.playVideo?.(); } catch { /* ignore */ }
       }
+      // Fallback: if still not playing after 1.5s, nudge again
+      window.setTimeout(() => {
+        const p = live(playerRef.current) || playerRef.current;
+        if (!p) return;
+        try {
+          const s = p.getPlayerState?.();
+          if (s !== 1 && s !== 3 && !userPausedRef.current) {
+            p.playVideo?.();
+          }
+        } catch { /* ignore */ }
+      }, 1500);
     }
   }, [playing, muted]);
 
   const skip = useCallback((direction: 1 | -1) => {
     const player = live(playerRef.current);
     if (!player) return;
+    userPausedRef.current = false;
     lockSync(0);
     setScrub(null);
     if (direction === 1) player.nextVideo();
@@ -1003,6 +1272,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     const player = live(playerRef.current);
     const videos = videosRef.current;
     if (!player || index < 0 || index >= videos.length) return;
+    userPausedRef.current = false;
     lockSync(0);
     setScrub(null);
     setDuration(0);
@@ -1128,7 +1398,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
             className="radio-avatar"
             type="button"
             onClick={toggle}
-            disabled={!ready}
+            onTouchEnd={(e) => { e.preventDefault(); toggle(); }}
             aria-label={playing ? "रोकें" : "चलाएँ"}
             data-playing={playing}
           >
@@ -1197,19 +1467,19 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
             >
               <ShuffleIcon />
             </button>
-            <button type="button" onClick={() => skip(-1)} disabled={!ready} aria-label="पिछला गाना">
+            <button type="button" onClick={() => skip(-1)} onTouchEnd={(e) => { e.preventDefault(); skip(-1); }} aria-label="पिछला गाना">
               <PrevIcon />
             </button>
             <button
               className="radio-play"
               type="button"
               onClick={toggle}
-              disabled={!ready}
+              onTouchEnd={(e) => { e.preventDefault(); toggle(); }}
               aria-label={playing ? theme.ctaPause : theme.ctaPlay}
             >
               {playing ? <PauseIcon /> : <PlayIcon />}
             </button>
-            <button type="button" onClick={() => skip(1)} disabled={!ready} aria-label="अगला गाना">
+            <button type="button" onClick={() => skip(1)} onTouchEnd={(e) => { e.preventDefault(); skip(1); }} aria-label="अगला गाना">
               <NextIcon />
             </button>
             <button type="button" onClick={() => setShowSearch(true)} aria-label="गाना खोजें">
@@ -1525,7 +1795,7 @@ function ExtIcon() {
   );
 }
 
-export function BarberExperience({ place }: { place: Place }) {
+function BarberExperienceInner({ place }: { place: Place }) {
   const [muted, setMuted] = useState(false);
   const [listening, setListening] = useState(false);
   const [revealed, setRevealed] = useState(false);
@@ -1544,7 +1814,14 @@ export function BarberExperience({ place }: { place: Place }) {
     te: 0,
   });
 
+  const lastSpeakRef = useRef(0);
+
   const speakDialogue = useCallback((stationId: StationId) => {
+    // Debounce rapid taps to prevent speechSynthesis crashes
+    const now = Date.now();
+    if (now - lastSpeakRef.current < 2000) return;
+    lastSpeakRef.current = now;
+
     const item = SALON_DIALOGUES[stationId] || SALON_DIALOGUES.hi;
     const count = dialogueCounters.current[stationId] ?? 0;
     const text = item.lines[count % item.lines.length];
@@ -1649,7 +1926,7 @@ export function BarberExperience({ place }: { place: Place }) {
     window.setTimeout(() => setLightning(false), 450);
   }, []);
 
-  useRoomTone(place, false);
+  useRoomTone(place, true);
   useWeatherTone(weather, handleThunder);
 
   useEffect(() => {
@@ -1666,6 +1943,26 @@ export function BarberExperience({ place }: { place: Place }) {
     warm();
     window.speechSynthesis.addEventListener("voiceschanged", warm);
     return () => window.speechSynthesis.removeEventListener("voiceschanged", warm);
+  }, []);
+
+  // Global error guard: catch unhandled rejections + errors so the page never crashes
+  useEffect(() => {
+    const onUnhandled = (e: PromiseRejectionEvent) => {
+      e.preventDefault();
+      // eslint-disable-next-line no-console
+      console.warn("[Salon] Unhandled rejection suppressed:", e.reason);
+    };
+    const onError = (e: ErrorEvent) => {
+      if (e.message?.includes("ResizeObserver") || e.message?.includes("Script error")) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("unhandledrejection", onUnhandled);
+    window.addEventListener("error", onError);
+    return () => {
+      window.removeEventListener("unhandledrejection", onUnhandled);
+      window.removeEventListener("error", onError);
+    };
   }, []);
 
   useEffect(() => {
@@ -1825,5 +2122,13 @@ export function BarberExperience({ place }: { place: Place }) {
         </div>
       </div>
     </main>
+  );
+}
+
+export function BarberExperience({ place }: { place: Place }) {
+  return (
+    <PlayerErrorBoundary>
+      <BarberExperienceInner place={place} />
+    </PlayerErrorBoundary>
   );
 }

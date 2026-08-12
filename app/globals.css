@@ -1720,10 +1720,23 @@ button.place-pill.lang-pill:hover {
 }
 
 .radio-long .radio-keys button {
+  align-items: center;
   background: transparent;
   border-color: transparent;
+  cursor: pointer;
+  display: flex;
   height: 2.15rem;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
   width: 2.15rem;
+}
+
+.radio-long .radio-keys button,
+.radio-long .radio-avatar {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .radio-long .radio-keys button.radio-play,
@@ -1736,12 +1749,15 @@ button.place-pill.lang-pill:hover {
     inset 0 1px 0 rgb(255 255 255 / 0.35),
     0 2px 8px rgb(0 0 0 / 0.4);
   color: #1a110c;
+  cursor: pointer;
   display: flex;
   flex-shrink: 0;
-  height: 2.55rem;
+  height: 2.75rem;
   justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
   transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
-  width: 2.55rem;
+  width: 2.75rem;
 }
 
 .radio-long .radio-keys button.radio-play:hover,
@@ -1751,6 +1767,18 @@ button.place-pill.lang-pill:hover {
   box-shadow: 0 3px 10px rgb(0 0 0 / 0.4);
   color: #1a110c;
   transform: scale(1.04);
+}
+
+.radio-long .radio-keys button.radio-play:active,
+.radio-long .radio-play:active {
+  transform: scale(0.92);
+  transition-duration: 60ms;
+}
+
+.radio-long .radio-keys button:active {
+  opacity: 0.65;
+  transform: scale(0.88);
+  transition: transform 60ms ease;
 }
 
 .radio-long .radio-keys button.radio-play svg,
