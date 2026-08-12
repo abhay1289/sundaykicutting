@@ -913,6 +913,25 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     return () => window.removeEventListener("deluxe-salon-search", openSearch);
   }, []);
 
+  // Listen for force-play from tap gate (ensures playVideo inside user gesture chain)
+  useEffect(() => {
+    const handleForcePlay = () => {
+      userWantsPlayRef.current = true;
+      userPausedRef.current = false;
+      hasInteractedRef.current = true;
+      const p = playerRef.current;
+      if (p) {
+        try {
+          const videos = videosRef.current;
+          p.loadPlaylist?.(videos, 0, 0);
+        } catch { /* ignore */ }
+        try { p.playVideo?.(); } catch { /* ignore */ }
+      }
+    };
+    window.addEventListener("salon-force-play", handleForcePlay);
+    return () => window.removeEventListener("salon-force-play", handleForcePlay);
+  }, []);
+
   useEffect(() => {
     if (status !== "ready") return;
     const player = live(playerRef.current);
@@ -1070,13 +1089,22 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               if (mutedRef.current) event.target.mute();
 
               try {
-                if (hasInteractedRef.current) {
+                if (hasInteractedRef.current || userWantsPlayRef.current) {
                   event.target.loadPlaylist?.(videos, startIndex, deepLink.start);
+                  userInitiatedPlay = true;
                 } else {
                   event.target.cuePlaylist?.(videos, startIndex, deepLink.start);
                 }
               } catch {
                 /* ignore */
+              }
+
+              // If user already tapped play before player was ready, start now
+              if (userWantsPlayRef.current && !userPausedRef.current) {
+                window.setTimeout(() => {
+                  if (disposed) return;
+                  try { event.target.playVideo?.(); } catch { /* ignore */ }
+                }, 300);
               }
 
               setVideoId(videos[startIndex] ?? "");
@@ -1254,11 +1282,19 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     if (now - lastActionRef.current < 300) return;
     lastActionRef.current = now;
 
+    // Mark interaction for autoplay policy
+    hasInteractedRef.current = true;
+
     const player = live(playerRef.current);
 
     // If player isn't ready yet, try raw access (some devices report ready but live() fails)
     const raw = player || playerRef.current;
-    if (!raw) return;
+    if (!raw) {
+      // Player not created yet — queue the intent so it auto-plays once ready
+      userWantsPlayRef.current = true;
+      userPausedRef.current = false;
+      return;
+    }
 
     if (playing) {
       userPausedRef.current = true;
@@ -2113,6 +2149,8 @@ function BarberExperienceInner({ place }: { place: Place }) {
           onClick={() => {
             hasInteractedRef.current = true;
             setHasInteracted(true);
+            // Dispatch custom event that PlaceDeck listens for
+            window.dispatchEvent(new Event("salon-force-play"));
           }}
           aria-label="टैप करके म्यूज़िक शुरू करें"
         >
