@@ -1080,11 +1080,11 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               const iframe = wrapper.querySelector("iframe");
               iframe?.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
 
-              // Start muted if user hasn't interacted (browsers allow muted autoplay)
-              if (!hasInteractedRef.current && !userWantsPlayRef.current) {
+              // Always try unmuted first — browser may allow it
+              if (mutedRef.current) {
                 event.target.mute();
-              } else if (mutedRef.current) {
-                event.target.mute();
+              } else {
+                event.target.unMute();
               }
 
               // Always use loadPlaylist to auto-start playback immediately
@@ -1897,9 +1897,9 @@ function BarberExperienceInner({ place }: { place: Place }) {
   const [weather, setWeather] = useState<WeatherId>("clear");
   const [speechBubble, setSpeechBubble] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [hasInteracted, setHasInteracted] = useState(false);
+  const [hasInteracted, setHasInteracted] = useState(true);
   const [inAppBrowser, setInAppBrowser] = useState<string | null>(null);
-  const hasInteractedRef = useRef(false);
+  const hasInteractedRef = useRef(true);
 
   const dialogueCounters = useRef<Record<StationId, number>>({
     hi: 0,
@@ -2114,38 +2114,7 @@ function BarberExperienceInner({ place }: { place: Place }) {
       data-weather={weather}
       style={themeStyle}
     >
-      {/* In-app browser warning */}
-      {inAppBrowser && (
-        <div className="inapp-banner" role="alert">
-          <p>{inAppBrowser} ब्राउज़र में गाने नहीं चलते।</p>
-          <a
-            href={window.location.href}
-            target="_blank"
-            rel="noreferrer"
-            className="inapp-banner-btn"
-          >
-            Chrome / Safari में खोलें ↗
-          </a>
-        </div>
-      )}
 
-      {/* Tap-to-unmute gate — music is already playing muted */}
-      {!hasInteracted && !inAppBrowser && (
-        <button
-          type="button"
-          className="tap-to-play-gate"
-          onClick={() => {
-            hasInteractedRef.current = true;
-            setHasInteracted(true);
-            // Unmute the already-playing audio
-            window.dispatchEvent(new Event("salon-force-play"));
-          }}
-          aria-label="टैप करके आवाज़ चालू करें"
-        >
-          <span className="tap-gate-icon">🔊</span>
-          <span className="tap-gate-label">टैप करें — आवाज़ सुनें</span>
-        </button>
-      )}
 
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
