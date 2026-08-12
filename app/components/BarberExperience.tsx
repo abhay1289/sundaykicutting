@@ -1947,16 +1947,23 @@ function BarberExperienceInner({ place }: { place: Place }) {
         if (FEMALE.test(v.name)) return -100;
         let s = 0;
         if (MALE.test(v.name)) s += 50;
-        if (inLang.includes(v)) s += 30;
-        if (/en-IN/i.test(v.lang)) s += 20;
-        if (/en-GB/i.test(v.lang) && MALE.test(v.name)) s += 18;
-        if (/en-US/i.test(v.lang) && MALE.test(v.name)) s += 14;
-        if (/^(hi|pa|ta|te)/i.test(v.lang) && !FEMALE.test(v.name)) s += 10;
+        // Strongly prefer voices that can actually speak the target language
+        if (inLang.includes(v)) s += 200;
+        // Hindi voices can handle Bhojpuri/Haryanvi text too
+        if (langPrefix === "hi" && /^hi/i.test(v.lang)) s += 200;
+        if (/^(pa|ta|te)/i.test(langPrefix) && new RegExp(`^${langPrefix}`, "i").test(v.lang)) s += 200;
+        // Only give minor bonus to English voices (they can't speak Devanagari)
+        if (/en-IN/i.test(v.lang) && inLang.length === 0) s += 5;
         return s;
       };
 
       const ranked = [...voices].sort((a, b) => score(b) - score(a));
-      return ranked.find((v) => score(v) > 0) || ranked.find((v) => !FEMALE.test(v.name)) || null;
+      // Prefer in-language voice first, even if female, over English voice saying "?"
+      const best = ranked.find((v) => score(v) > 0);
+      if (best && inLang.includes(best)) return best;
+      // If no in-language male voice, use any in-language voice (even female) over garbled English
+      if (inLang.length > 0) return inLang[0];
+      return best || ranked.find((v) => !FEMALE.test(v.name)) || null;
     };
 
     const speakWith = (voices: SpeechSynthesisVoice[]) => {
@@ -1966,16 +1973,13 @@ function BarberExperienceInner({ place }: { place: Place }) {
         const maleVoice = pickMaleVoice(voices);
         if (maleVoice) {
           utterance.voice = maleVoice;
-          // Keep utterance.lang aligned with the chosen male voice when
-          // Indic female system voices (e.g. Lekha) are the only hi-* option.
-          utterance.lang = FEMALE.test(maleVoice.name)
-            ? item.langCode
-            : maleVoice.lang || item.langCode;
+          // Always set lang to target language so the engine knows the script
+          utterance.lang = item.langCode;
         } else {
           utterance.lang = item.langCode;
         }
         utterance.rate = 0.9;
-        utterance.pitch = 0.72; // deep male baritone without sounding robotic
+        utterance.pitch = 0.72;
         window.speechSynthesis.speak(utterance);
       } catch {
         /* ignore speech synthesis errors */
