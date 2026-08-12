@@ -2618,11 +2618,37 @@ button.place-pill.lang-pill:hover {
 
 .deck-fallback {
   border: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
-  position: absolute;
-  width: 0;
+  border-radius: 0.5rem;
+  height: 220px;
+  margin: 0.5rem auto;
+  max-width: min(38rem, 92vw);
+  width: 100%;
+}
+
+.deck-fallback-wrap {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.deck-fallback-msg {
+  color: var(--amber, #f3e6c8);
+  font-size: 0.85rem;
+  opacity: 0.8;
+  text-align: center;
+}
+
+.deck-fallback-retry {
+  background: linear-gradient(180deg, #f3e6c8, #e2cfa6);
+  border: none;
+  border-radius: 1.2rem;
+  color: #1a110c;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.4rem 1.2rem;
 }
 
 .yt-host {
@@ -2834,6 +2860,74 @@ button.place-pill.lang-pill:hover {
 
 @media (max-height: 460px) {
   .place-note { font-size: 0.82rem; margin-top: 0.45rem; }
+}
+
+/* Tap-to-play first-interaction gate */
+.tap-to-play-gate {
+  align-items: center;
+  animation: tap-pulse 2s ease-in-out infinite;
+  background: rgb(0 0 0 / 0.7);
+  backdrop-filter: blur(6px);
+  border: none;
+  color: #f3e6c8;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  font-family: inherit;
+  gap: 0.8rem;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 9999;
+}
+.tap-gate-icon {
+  align-items: center;
+  background: linear-gradient(180deg, #f3e6c8, #e2cfa6);
+  border-radius: 50%;
+  box-shadow: 0 0 30px rgb(226 207 166 / 0.4);
+  color: #1a110c;
+  display: flex;
+  font-size: 2rem;
+  height: 5rem;
+  justify-content: center;
+  width: 5rem;
+}
+.tap-gate-label {
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+@keyframes tap-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.92; }
+}
+
+/* In-app browser warning banner */
+.inapp-banner {
+  align-items: center;
+  background: #e24a35;
+  color: #fff;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.92rem;
+  gap: 0.6rem;
+  justify-content: center;
+  padding: 0.7rem 1rem;
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 10000;
+}
+.inapp-banner p { margin: 0; }
+.inapp-banner-btn {
+  background: #fff;
+  border-radius: 1rem;
+  color: #1a110c;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.35rem 1rem;
+  text-decoration: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

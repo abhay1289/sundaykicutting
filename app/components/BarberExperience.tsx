@@ -150,8 +150,12 @@ function loadYouTubeApi(attempt = 0): Promise<YouTubeApi> {
         if (window.YT?.Player) resolve(window.YT);
         else reject(new Error("YouTube iframe API loaded without a player"));
       };
+      // Remove stale script from prior failed attempts before adding a new one
       const existing = document.querySelector('script[src*="youtube.com/iframe_api"]');
-      if (!existing) {
+      if (existing && attempt > 0) {
+        existing.remove();
+      }
+      if (!existing || attempt > 0) {
         const script = document.createElement("script");
         script.src = "https://www.youtube.com/iframe_api";
         script.async = true;
@@ -511,7 +515,7 @@ function RainCanvas() {
     window.addEventListener("resize", handleResize);
 
     // Reduce particle count on low-end devices (< 4 cores or low memory)
-    const isLowEnd = (navigator.hardwareConcurrency ?? 4) <= 2;
+    const isLowEnd = (navigator.hardwareConcurrency || 2) <= 2;
     const dropCap = isLowEnd ? 80 : 180;
 
     const dropCount = Math.min(Math.floor((width * height) / 8000), dropCap);
@@ -847,6 +851,7 @@ type DeckProps = {
   station: StationId;
   onStationChange: (station: StationId) => void;
   onListeningChange?: (listening: boolean) => void;
+  hasInteractedRef: React.RefObject<boolean>;
 };
 
 /**
@@ -858,11 +863,12 @@ type DeckProps = {
  * carrying the title, the rail and the transport. Only the record takes part in
  * page layout, so the card overlays the wallpaper and the record never moves.
  */
-function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onListeningChange }: DeckProps) {
+function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onListeningChange, hasInteractedRef }: DeckProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const mutedRef = useRef(muted);
   const userPausedRef = useRef(false);
+  const userWantsPlayRef = useRef(false);
   const lastActionRef = useRef(0);
 
   const queue = useMemo(() => tracksForStation(station), [station]);
@@ -880,6 +886,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   const [videoId, setVideoId] = useState("");
   const [showLyrics, setShowLyrics] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [mountKey, setMountKey] = useState(0);
   const videosRef = useRef(queueVideos);
   const stationBooted = useRef(false);
 
@@ -956,6 +963,9 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     let resumeTimer = 0;
     let watchdogTimer = 0;
     const wrapper = hostRef.current;
+    let cleanupVisibility: (() => void) | null = null;
+    let cleanupOnline: (() => void) | null = null;
+    let cleanupFocus: (() => void) | null = null;
 
     const deepLink = readDeepLink();
 
@@ -990,7 +1000,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
         wrapper.appendChild(mount);
 
         let errorCount = 0;
-        let userInitiatedPlay = false;
+        let userInitiatedPlay = userWantsPlayRef.current;
         let lastPlayingAt = 0;
 
         const tryResume = (target: YouTubePlayer) => {
@@ -1010,6 +1020,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
         const startWatchdog = (target: YouTubePlayer) => {
           window.clearInterval(watchdogTimer);
           watchdogTimer = window.setInterval(() => {
+            if (userWantsPlayRef.current) userInitiatedPlay = true;
             if (disposed || !userInitiatedPlay || userPausedRef.current) return;
 
             // Check if iframe is still in the DOM (crash/gc protection)
@@ -1059,7 +1070,11 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               if (mutedRef.current) event.target.mute();
 
               try {
-                event.target.cuePlaylist?.(videos, startIndex, deepLink.start);
+                if (hasInteractedRef.current) {
+                  event.target.loadPlaylist?.(videos, startIndex, deepLink.start);
+                } else {
+                  event.target.cuePlaylist?.(videos, startIndex, deepLink.start);
+                }
               } catch {
                 /* ignore */
               }
@@ -1072,28 +1087,36 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               // Resume on visibility change (mobile tab switch / lock screen)
               const handleVisibility = () => {
                 if (disposed || userPausedRef.current) return;
+                if (userWantsPlayRef.current) userInitiatedPlay = true;
                 if (document.visibilityState === "visible" && userInitiatedPlay) {
                   window.clearTimeout(resumeTimer);
                   resumeTimer = window.setTimeout(() => tryResume(event.target), 600);
                 }
               };
               document.addEventListener("visibilitychange", handleVisibility);
+              cleanupVisibility = () => document.removeEventListener("visibilitychange", handleVisibility);
 
               // Resume on network reconnect
               const handleOnline = () => {
-                if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+                if (disposed || userPausedRef.current) return;
+                if (userWantsPlayRef.current) userInitiatedPlay = true;
+                if (!userInitiatedPlay) return;
                 window.clearTimeout(resumeTimer);
                 resumeTimer = window.setTimeout(() => tryResume(event.target), 1200);
               };
               window.addEventListener("online", handleOnline);
+              cleanupOnline = () => window.removeEventListener("online", handleOnline);
 
               // Audio focus: resume when another app releases audio
               const handleFocus = () => {
-                if (disposed || !userInitiatedPlay || userPausedRef.current) return;
+                if (disposed || userPausedRef.current) return;
+                if (userWantsPlayRef.current) userInitiatedPlay = true;
+                if (!userInitiatedPlay) return;
                 window.clearTimeout(resumeTimer);
                 resumeTimer = window.setTimeout(() => tryResume(event.target), 800);
               };
               window.addEventListener("focus", handleFocus);
+              cleanupFocus = () => window.removeEventListener("focus", handleFocus);
             },
             onStateChange: (event) => {
               if (disposed) return;
@@ -1147,7 +1170,15 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
                     try { event.target.playVideo?.(); } catch { /* ignore */ }
                   }, 1000);
                 } catch {
-                  setStatus("unavailable");
+                  // All videos failed — auto-switch to next station
+                  const stationIds = STATIONS.map((s) => s.id);
+                  const currentIdx = stationIds.indexOf(station);
+                  const nextStation = stationIds[(currentIdx + 1) % stationIds.length];
+                  if (nextStation && nextStation !== station) {
+                    onStationChange(nextStation);
+                  } else {
+                    setStatus("unavailable");
+                  }
                 }
               } else {
                 window.clearTimeout(resumeTimer);
@@ -1168,18 +1199,17 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       })
       .catch(() => {
         if (disposed) return;
-        // Show unavailable but retry once user comes back online or after delay
         setStatus("unavailable");
         const retryDelay = window.setTimeout(() => {
           if (disposed) return;
           apiPromise = null;
-          setStatus("loading");
+          setMountKey((k) => k + 1);
         }, 8000);
         const retryOnline = () => {
           if (disposed) return;
           window.clearTimeout(retryDelay);
           apiPromise = null;
-          setStatus("loading");
+          setMountKey((k) => k + 1);
         };
         window.addEventListener("online", retryOnline, { once: true });
       });
@@ -1188,13 +1218,16 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       disposed = true;
       window.clearTimeout(resumeTimer);
       window.clearInterval(watchdogTimer);
+      cleanupVisibility?.();
+      cleanupOnline?.();
+      cleanupFocus?.();
       playerRef.current = null;
       try {
         player?.destroy();
       } catch { /* iframe already gone */ }
       if (wrapper) wrapper.textContent = "";
     };
-  }, [place.id]);
+  }, [place.id, mountKey]);
 
   // Drive lyrics + seek bar directly from YouTube's clock while audio is playing.
   useEffect(() => {
@@ -1232,6 +1265,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       try { raw.pauseVideo?.(); } catch { /* ignore */ }
     } else {
       userPausedRef.current = false;
+      userWantsPlayRef.current = true;
       try {
         if (muted) { raw.mute?.(); } else { raw.unMute?.(); }
       } catch { /* ignore */ }
@@ -1259,29 +1293,36 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   }, [playing, muted]);
 
   const skip = useCallback((direction: 1 | -1) => {
-    const player = live(playerRef.current);
+    const player = live(playerRef.current) || playerRef.current;
     if (!player) return;
     userPausedRef.current = false;
+    userWantsPlayRef.current = true;
     lockSync(0);
     setScrub(null);
-    if (direction === 1) player.nextVideo();
-    else player.previousVideo();
+    try {
+      if (direction === 1) player.nextVideo?.();
+      else player.previousVideo?.();
+    } catch { /* ignore */ }
   }, []);
 
   const jumpTo = useCallback((index: number) => {
-    const player = live(playerRef.current);
+    const player = live(playerRef.current) || playerRef.current;
     const videos = videosRef.current;
     if (!player || index < 0 || index >= videos.length) return;
     userPausedRef.current = false;
+    userWantsPlayRef.current = true;
     lockSync(0);
     setScrub(null);
     setDuration(0);
     try {
-      player.playVideoAt(index);
+      player.playVideoAt?.(index);
     } catch {
       try {
-        player.cuePlaylist?.(videos, index, 0);
-        window.setTimeout(() => live(playerRef.current)?.playVideo(), 200);
+        player.loadPlaylist?.(videos, index, 0);
+        window.setTimeout(() => {
+          const p = live(playerRef.current) || playerRef.current;
+          try { p?.playVideo?.(); } catch { /* ignore */ }
+        }, 400);
       } catch {
         /* ignore */
       }
@@ -1300,13 +1341,16 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   }, [jumpTo]);
 
   const nudge = useCallback((delta: number) => {
-    const player = live(playerRef.current);
+    const player = live(playerRef.current) || playerRef.current;
     if (!player) return;
-    const total = player.getDuration();
-    const target = player.getCurrentTime() + delta;
-    const next = Math.max(0, total > 0 ? Math.min(target, total) : target);
-    player.seekTo(next, true);
-    lockSync(next);
+    try {
+      const total = player.getDuration?.() ?? 0;
+      const current = player.getCurrentTime?.() ?? 0;
+      const target = current + delta;
+      const next = Math.max(0, total > 0 ? Math.min(target, total) : target);
+      player.seekTo?.(next, true);
+      lockSync(next);
+    } catch { /* ignore */ }
   }, []);
 
   const commitScrub = () => {
@@ -1317,10 +1361,12 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   };
 
   const toggleMute = useCallback(() => {
-    const player = live(playerRef.current);
+    const player = live(playerRef.current) || playerRef.current;
     if (!player) return;
-    if (muted) player.unMute();
-    else player.mute();
+    try {
+      if (muted) player.unMute?.();
+      else player.mute?.();
+    } catch { /* ignore */ }
     onMutedChange(!muted);
   }, [muted, onMutedChange]);
 
@@ -1513,13 +1559,23 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       />
 
       {status === "unavailable" && (
-        <iframe
-          className="deck-fallback"
-          title={`${place.playlist.title} — YouTube`}
-          src={fallbackSrc}
-          allow="autoplay; encrypted-media; picture-in-picture"
-          allowFullScreen
-        />
+        <div className="deck-fallback-wrap">
+          <iframe
+            className="deck-fallback"
+            title={`${place.playlist.title} — YouTube`}
+            src={fallbackSrc}
+            allow="autoplay; encrypted-media; picture-in-picture"
+            allowFullScreen
+          />
+          <p className="deck-fallback-msg">प्लेयर लोड नहीं हुआ — YouTube से सीधे सुनें या रीट्राई करें</p>
+          <button
+            type="button"
+            className="deck-fallback-retry"
+            onClick={() => { apiPromise = null; setMountKey((k) => k + 1); }}
+          >
+            फिर कोशिश करें
+          </button>
+        </div>
       )}
 
       <div className="yt-host" ref={hostRef} aria-hidden="true" />
@@ -1795,6 +1851,19 @@ function ExtIcon() {
   );
 }
 
+/** Detect social-media in-app browsers that can't play YouTube embeds. */
+function detectInAppBrowser(): string | null {
+  if (typeof navigator === "undefined") return null;
+  const ua = navigator.userAgent || "";
+  if (/FBAN|FBAV/i.test(ua)) return "Facebook";
+  if (/Instagram/i.test(ua)) return "Instagram";
+  if (/WhatsApp/i.test(ua)) return "WhatsApp";
+  if (/Line\//i.test(ua)) return "Line";
+  if (/Snapchat/i.test(ua)) return "Snapchat";
+  if (/Twitter|X/i.test(ua)) return "Twitter";
+  return null;
+}
+
 function BarberExperienceInner({ place }: { place: Place }) {
   const [muted, setMuted] = useState(false);
   const [listening, setListening] = useState(false);
@@ -1804,6 +1873,9 @@ function BarberExperienceInner({ place }: { place: Place }) {
   const [weather, setWeather] = useState<WeatherId>("clear");
   const [speechBubble, setSpeechBubble] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [hasInteracted, setHasInteracted] = useState(false);
+  const [inAppBrowser, setInAppBrowser] = useState<string | null>(null);
+  const hasInteractedRef = useRef(false);
 
   const dialogueCounters = useRef<Record<StationId, number>>({
     hi: 0,
@@ -1934,6 +2006,28 @@ function BarberExperienceInner({ place }: { place: Place }) {
     return () => window.clearTimeout(timer);
   }, []);
 
+  // Detect in-app browsers on mount
+  useEffect(() => {
+    setInAppBrowser(detectInAppBrowser());
+  }, []);
+
+  // Track first user interaction (needed for autoplay policy compliance)
+  useEffect(() => {
+    if (hasInteracted) return;
+    const markInteracted = () => {
+      if (!hasInteractedRef.current) {
+        hasInteractedRef.current = true;
+        setHasInteracted(true);
+      }
+    };
+    document.addEventListener("pointerdown", markInteracted, { once: true });
+    document.addEventListener("keydown", markInteracted, { once: true });
+    return () => {
+      document.removeEventListener("pointerdown", markInteracted);
+      document.removeEventListener("keydown", markInteracted);
+    };
+  }, [hasInteracted]);
+
   // Warm up SpeechSynthesis voices so the first speaker tap gets a male voice.
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
@@ -1996,6 +2090,37 @@ function BarberExperienceInner({ place }: { place: Place }) {
       data-weather={weather}
       style={themeStyle}
     >
+      {/* In-app browser warning */}
+      {inAppBrowser && (
+        <div className="inapp-banner" role="alert">
+          <p>{inAppBrowser} ब्राउज़र में गाने नहीं चलते।</p>
+          <a
+            href={window.location.href}
+            target="_blank"
+            rel="noreferrer"
+            className="inapp-banner-btn"
+          >
+            Chrome / Safari में खोलें ↗
+          </a>
+        </div>
+      )}
+
+      {/* Tap-to-play gate for autoplay policy */}
+      {!hasInteracted && !inAppBrowser && (
+        <button
+          type="button"
+          className="tap-to-play-gate"
+          onClick={() => {
+            hasInteractedRef.current = true;
+            setHasInteracted(true);
+          }}
+          aria-label="टैप करके म्यूज़िक शुरू करें"
+        >
+          <span className="tap-gate-icon">▶</span>
+          <span className="tap-gate-label">टैप करें — म्यूज़िक शुरू होगा</span>
+        </button>
+      )}
+
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         className="place-wall"
@@ -2097,6 +2222,7 @@ function BarberExperienceInner({ place }: { place: Place }) {
           station={station}
           onStationChange={setStation}
           onListeningChange={setListening}
+          hasInteractedRef={hasInteractedRef}
         />
 
         <div className="place-extras">
