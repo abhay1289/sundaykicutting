@@ -741,6 +741,7 @@ type DeckProps = {
   onMutedChange: (muted: boolean) => void;
   station: StationId;
   onStationChange: (station: StationId) => void;
+  onListeningChange?: (listening: boolean) => void;
 };
 
 /**
@@ -752,7 +753,7 @@ type DeckProps = {
  * carrying the title, the rail and the transport. Only the record takes part in
  * page layout, so the card overlays the wallpaper and the record never moves.
  */
-function PlaceDeck({ place, muted, onMutedChange, station, onStationChange }: DeckProps) {
+function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onListeningChange }: DeckProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YouTubePlayer | null>(null);
   const mutedRef = useRef(muted);
@@ -778,6 +779,15 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange }: De
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
+
+  // Count as a listener while audio is playing or briefly buffering mid-track.
+  useEffect(() => {
+    onListeningChange?.(playing || buffering);
+  }, [playing, buffering, onListeningChange]);
+
+  useEffect(() => {
+    return () => onListeningChange?.(false);
+  }, [onListeningChange]);
 
   useEffect(() => {
     videosRef.current = queueVideos;
@@ -1286,24 +1296,134 @@ function LiveClock() {
   return <time className="place-clock">{label || "—"}</time>;
 }
 
-function OnlinePill() {
-  const [count, setCount] = useState(28);
+function ActiveUsers({ listening }: { listening: boolean }) {
+  const [count, setCount] = useState<number | null>(null);
+  const listeningRef = useRef(listening);
 
   useEffect(() => {
-    const bump = () => {
-      setCount((n) => {
-        const next = n + (Math.random() > 0.5 ? 1 : -1);
-        return Math.min(42, Math.max(18, next));
-      });
+    listeningRef.current = listening;
+  }, [listening]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let sessionId = "";
+
+    try {
+      sessionId = window.sessionStorage.getItem("salon-presence-id") || "";
+      if (!sessionId) {
+        sessionId =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID().replace(/-/g, "").slice(0, 24)
+            : `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+        window.sessionStorage.setItem("salon-presence-id", sessionId);
+      }
+    } catch {
+      sessionId = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    const sync = async (isListening: boolean) => {
+      try {
+        const res = await fetch("/api/presence", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: sessionId, listening: isListening }),
+          keepalive: true,
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { active?: number };
+        if (!cancelled && typeof data.active === "number") {
+          setCount(data.active);
+        }
+      } catch {
+        /* offline / blocked — keep last known count */
+      }
     };
-    const id = window.setInterval(bump, 12_000);
-    return () => window.clearInterval(id);
+
+    const refresh = async () => {
+      try {
+        const res = await fetch("/api/presence", { method: "GET" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { active?: number };
+        if (!cancelled && typeof data.active === "number") {
+          setCount(data.active);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
+    void sync(listeningRef.current);
+    const timer = window.setInterval(() => {
+      if (listeningRef.current) void sync(true);
+      else void refresh();
+    }, 12_000);
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (listeningRef.current) void sync(true);
+      else void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    const onLeave = () => {
+      try {
+        navigator.sendBeacon?.(
+          "/api/presence",
+          new Blob([JSON.stringify({ id: sessionId, listening: false })], {
+            type: "application/json",
+          }),
+        );
+      } catch {
+        /* ignore */
+      }
+    };
+    window.addEventListener("pagehide", onLeave);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pagehide", onLeave);
+      void sync(false);
+    };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const sessionId = window.sessionStorage.getItem("salon-presence-id");
+        if (!sessionId) return;
+        const res = await fetch("/api/presence", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: sessionId, listening }),
+          keepalive: true,
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { active?: number };
+        if (!cancelled && typeof data.active === "number") setCount(data.active);
+      } catch {
+        /* ignore */
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [listening]);
+
+  const label =
+    count == null ? "…" : count === 1 ? "1 सुन रहा" : `${count} सुन रहे`;
+
   return (
-    <span className="place-online">
+    <span
+      className={`place-online${listening ? " is-listening" : ""}`}
+      title="अभी गाना सुन रहे लोग"
+      aria-live="polite"
+    >
       <i aria-hidden="true" />
-      on air · {count}
+      {label}
     </span>
   );
 }
@@ -1407,6 +1527,7 @@ function ExtIcon() {
 
 export function BarberExperience({ place }: { place: Place }) {
   const [muted, setMuted] = useState(false);
+  const [listening, setListening] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [station, setStationState] = useState<StationId>("hi");
@@ -1434,35 +1555,76 @@ export function BarberExperience({ place }: { place: Place }) {
       setSpeechBubble((current) => (current === text ? null : current));
     }, 4500);
 
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+
+    const FEMALE =
+      /female|woman|lekha|meera|veena|kalpana|neerja|heera|geeta|vani|lekha|priya|kajal|zira|samantha|victoria|karen|susan|moira|fiona|tessa|siri|anna|martha|sara|allison|ava|kathy|vicki|alice|google uk english female|google.*female/i;
+    const MALE =
+      /male|\bman\b|rishabh|rishi|hemant|karan|madhav|madhur|valluvar|pradeep|ravi|amit|daniel|david|alex|fred|arthur|thomas|google uk english male|microsoft (david|ravi|mark)|aaron|bruce|jorge|juan|diego/i;
+
+    const pickMaleVoice = (voices: SpeechSynthesisVoice[]) => {
+      const langPrefix = item.langCode.split("-")[0];
+      const inLang = voices.filter(
+        (v) =>
+          v.lang.toLowerCase().startsWith(item.langCode.toLowerCase()) ||
+          v.lang.toLowerCase().startsWith(langPrefix.toLowerCase()),
+      );
+
+      const score = (v: SpeechSynthesisVoice) => {
+        if (FEMALE.test(v.name)) return -100;
+        let s = 0;
+        if (MALE.test(v.name)) s += 50;
+        if (inLang.includes(v)) s += 30;
+        if (/en-IN/i.test(v.lang)) s += 20;
+        if (/en-GB/i.test(v.lang) && MALE.test(v.name)) s += 18;
+        if (/en-US/i.test(v.lang) && MALE.test(v.name)) s += 14;
+        if (/^(hi|pa|ta|te)/i.test(v.lang) && !FEMALE.test(v.name)) s += 10;
+        return s;
+      };
+
+      const ranked = [...voices].sort((a, b) => score(b) - score(a));
+      return ranked.find((v) => score(v) > 0) || ranked.find((v) => !FEMALE.test(v.name)) || null;
+    };
+
+    const speakWith = (voices: SpeechSynthesisVoice[]) => {
       try {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = item.langCode;
-        utterance.rate = 0.88; // Conversational human pace
-        utterance.pitch = 0.4; // Deep natural male voice pitch (lowered to force masculine tone)
-
-        const voices = window.speechSynthesis.getVoices();
-        const langPrefix = item.langCode.split("-")[0];
-        const matchingVoices = voices.filter(
-          (v) => v.lang.startsWith(item.langCode) || v.lang.startsWith(langPrefix)
-        );
-
-        // Filter for realistic male voice
-        const maleVoice =
-          matchingVoices.find((v) =>
-            /male|man|rishabh|hemant|karan|madhav|valluvar|pradeep/i.test(v.name)
-          ) ||
-          matchingVoices.find((v) => !/female|woman|zira|siri|samantha|victoria|karen/i.test(v.name)) ||
-          matchingVoices[0];
-
-        if (maleVoice) utterance.voice = maleVoice;
-
+        const maleVoice = pickMaleVoice(voices);
+        if (maleVoice) {
+          utterance.voice = maleVoice;
+          // Keep utterance.lang aligned with the chosen male voice when
+          // Indic female system voices (e.g. Lekha) are the only hi-* option.
+          utterance.lang = FEMALE.test(maleVoice.name)
+            ? item.langCode
+            : maleVoice.lang || item.langCode;
+        } else {
+          utterance.lang = item.langCode;
+        }
+        utterance.rate = 0.9;
+        utterance.pitch = 0.72; // deep male baritone without sounding robotic
         window.speechSynthesis.speak(utterance);
       } catch {
         /* ignore speech synthesis errors */
       }
+    };
+
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) {
+      speakWith(voices);
+      return;
     }
+
+    // Chrome/Safari often populate voices asynchronously.
+    const onVoices = () => {
+      window.speechSynthesis.removeEventListener("voiceschanged", onVoices);
+      speakWith(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener("voiceschanged", onVoices);
+    window.setTimeout(() => {
+      window.speechSynthesis.removeEventListener("voiceschanged", onVoices);
+      speakWith(window.speechSynthesis.getVoices());
+    }, 400);
   }, []);
 
   const setStation = useCallback((nextStation: StationId) => {
@@ -1493,6 +1655,17 @@ export function BarberExperience({ place }: { place: Place }) {
   useEffect(() => {
     const timer = window.setTimeout(() => setRevealed(true), 60);
     return () => window.clearTimeout(timer);
+  }, []);
+
+  // Warm up SpeechSynthesis voices so the first speaker tap gets a male voice.
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const warm = () => {
+      void window.speechSynthesis.getVoices();
+    };
+    warm();
+    window.speechSynthesis.addEventListener("voiceschanged", warm);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", warm);
   }, []);
 
   useEffect(() => {
@@ -1540,7 +1713,10 @@ export function BarberExperience({ place }: { place: Place }) {
 
 
       <header className="place-top">
-        <LiveClock />
+        <div className="place-meta">
+          <LiveClock />
+          <ActiveUsers listening={listening} />
+        </div>
         <div className={`lang-switch ${menuOpen ? "is-open" : ""}`} role="tablist" aria-label="भाषा चुनें" onMouseLeave={() => setMenuOpen(false)}>
           <button
             type="button"
@@ -1601,7 +1777,7 @@ export function BarberExperience({ place }: { place: Place }) {
 
       {speechBubble && (
         <div className="salon-speech-toast" role="status">
-          <span className="toast-avatar">🗣️</span>
+          <span className="toast-avatar" aria-hidden="true">॥</span>
           <p>{speechBubble}</p>
         </div>
       )}
@@ -1623,6 +1799,7 @@ export function BarberExperience({ place }: { place: Place }) {
           onMutedChange={setMuted}
           station={station}
           onStationChange={setStation}
+          onListeningChange={setListening}
         />
 
         <div className="place-extras">
