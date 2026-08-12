@@ -913,7 +913,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     return () => window.removeEventListener("deluxe-salon-search", openSearch);
   }, []);
 
-  // Listen for force-play from tap gate (ensures playVideo inside user gesture chain)
+  // Listen for force-play/unmute from tap gate
   useEffect(() => {
     const handleForcePlay = () => {
       userWantsPlayRef.current = true;
@@ -921,37 +921,36 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       hasInteractedRef.current = true;
       const p = playerRef.current;
       if (p) {
-        try {
-          const videos = videosRef.current;
-          p.loadPlaylist?.(videos, 0, 0);
-        } catch { /* ignore */ }
+        try { p.unMute?.(); } catch { /* ignore */ }
         try { p.playVideo?.(); } catch { /* ignore */ }
       }
+      onMutedChange(false);
     };
     window.addEventListener("salon-force-play", handleForcePlay);
     return () => window.removeEventListener("salon-force-play", handleForcePlay);
-  }, []);
+  }, [onMutedChange]);
 
   useEffect(() => {
     if (status !== "ready") return;
-    const player = live(playerRef.current);
+    const player = live(playerRef.current) || playerRef.current;
     if (!player) return;
     
     if (!stationBooted.current) {
       stationBooted.current = true;
-      player.playVideo?.();
-      // Fallback: if autoplay was blocked, nudge again after delay
+      // Player already auto-started via loadPlaylist in onReady.
+      // Just ensure it's actually playing:
       window.setTimeout(() => {
-        const p = live(playerRef.current);
+        const p = live(playerRef.current) || playerRef.current;
         if (!p) return;
         try {
           const s = p.getPlayerState?.();
-          if (s === -1 || s === 5) p.playVideo?.();
+          if (s !== 1 && s !== 3) p.playVideo?.();
         } catch { /* ignore */ }
-      }, 1500);
+      }, 1000);
       return;
     }
     
+    // Station changed — load new playlist
     const videos = videosRef.current;
     if (!videos.length) return;
     
@@ -965,12 +964,6 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       player.loadPlaylist?.(videos, 0, 0);
       setVideoId(videos[0] ?? "");
       setPosition({ index: 1, total: videos.length });
-      // Ensure playback starts after loadPlaylist
-      window.setTimeout(() => {
-        const p = live(playerRef.current);
-        if (!p) return;
-        try { p.playVideo?.(); } catch { /* ignore */ }
-      }, 800);
     } catch {
       /* ignore */
     }
@@ -1070,7 +1063,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
         player = new api.Player(mount, {
           host: "https://www.youtube.com",
           playerVars: {
-            autoplay: 0,
+            autoplay: 1,
             controls: 0,
             disablekb: 1,
             enablejsapi: 1,
@@ -1086,25 +1079,20 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               playerRef.current = event.target;
               const iframe = wrapper.querySelector("iframe");
               iframe?.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
-              if (mutedRef.current) event.target.mute();
 
-              try {
-                if (hasInteractedRef.current || userWantsPlayRef.current) {
-                  event.target.loadPlaylist?.(videos, startIndex, deepLink.start);
-                  userInitiatedPlay = true;
-                } else {
-                  event.target.cuePlaylist?.(videos, startIndex, deepLink.start);
-                }
-              } catch {
-                /* ignore */
+              // Start muted if user hasn't interacted (browsers allow muted autoplay)
+              if (!hasInteractedRef.current && !userWantsPlayRef.current) {
+                event.target.mute();
+              } else if (mutedRef.current) {
+                event.target.mute();
               }
 
-              // If user already tapped play before player was ready, start now
-              if (userWantsPlayRef.current && !userPausedRef.current) {
-                window.setTimeout(() => {
-                  if (disposed) return;
-                  try { event.target.playVideo?.(); } catch { /* ignore */ }
-                }, 300);
+              // Always use loadPlaylist to auto-start playback immediately
+              try {
+                event.target.loadPlaylist?.(videos, startIndex, deepLink.start);
+                userInitiatedPlay = true;
+              } catch {
+                /* ignore */
               }
 
               setVideoId(videos[startIndex] ?? "");
@@ -2141,7 +2129,7 @@ function BarberExperienceInner({ place }: { place: Place }) {
         </div>
       )}
 
-      {/* Tap-to-play gate for autoplay policy */}
+      {/* Tap-to-unmute gate — music is already playing muted */}
       {!hasInteracted && !inAppBrowser && (
         <button
           type="button"
@@ -2149,13 +2137,13 @@ function BarberExperienceInner({ place }: { place: Place }) {
           onClick={() => {
             hasInteractedRef.current = true;
             setHasInteracted(true);
-            // Dispatch custom event that PlaceDeck listens for
+            // Unmute the already-playing audio
             window.dispatchEvent(new Event("salon-force-play"));
           }}
-          aria-label="टैप करके म्यूज़िक शुरू करें"
+          aria-label="टैप करके आवाज़ चालू करें"
         >
-          <span className="tap-gate-icon">▶</span>
-          <span className="tap-gate-label">टैप करें — म्यूज़िक शुरू होगा</span>
+          <span className="tap-gate-icon">🔊</span>
+          <span className="tap-gate-label">टैप करें — आवाज़ सुनें</span>
         </button>
       )}
 
