@@ -85,6 +85,10 @@ type YouTubePlayer = {
   getPlaylistIndex(): number;
   getVideoData(): { title?: string; author?: string; video_id?: string };
   destroy(): void;
+  loadVideoById?(
+    videoId: string | { videoId: string; startSeconds?: number },
+    startSeconds?: number,
+  ): void;
   cuePlaylist?(
     playlist: string | string[] | {
       listType?: string;
@@ -109,6 +113,40 @@ type YouTubePlayer = {
   ): void;
   getPlayerState?(): number;
 };
+
+/** YouTube loadPlaylist often fails silently above ~40–100 video IDs (URL too long). */
+const YT_PLAYLIST_CAP = 40;
+
+/** Build a short playlist window starting at `startIndex` (wraps). */
+function windowedPlaylist(all: string[], startIndex: number, max = YT_PLAYLIST_CAP) {
+  if (!all.length) return { ids: [] as string[], localIndex: 0 };
+  if (all.length <= max) {
+    return { ids: all, localIndex: Math.min(Math.max(0, startIndex), all.length - 1) };
+  }
+  const start = ((startIndex % all.length) + all.length) % all.length;
+  const ids: string[] = [];
+  for (let i = 0; i < max; i++) ids.push(all[(start + i) % all.length]!);
+  return { ids, localIndex: 0 };
+}
+
+function loadQueueAt(
+  player: YouTubePlayer,
+  all: string[],
+  absoluteIndex: number,
+  startSeconds = 0,
+) {
+  const { ids, localIndex } = windowedPlaylist(all, absoluteIndex);
+  if (!ids.length) return;
+  try {
+    player.loadPlaylist?.(ids, localIndex, startSeconds);
+  } catch {
+    try {
+      player.loadVideoById?.(ids[localIndex]!, startSeconds);
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 type YouTubeEvent = { data: number; target: YouTubePlayer };
 
@@ -888,6 +926,7 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
   const [showSearch, setShowSearch] = useState(false);
   const [mountKey, setMountKey] = useState(0);
   const videosRef = useRef(queueVideos);
+  const queueIndexRef = useRef(0);
   const stationBooted = useRef(false);
 
   useEffect(() => {
@@ -950,18 +989,19 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       return;
     }
     
-    // Station changed — load new playlist
+    // Station changed — load new playlist (capped for YouTube URL limits)
     const videos = videosRef.current;
     if (!videos.length) return;
     
     userPausedRef.current = false;
+    queueIndexRef.current = 0;
     setElapsed(0);
     setScrub(null);
     setDuration(0);
     setPlaying(true);
     
     try {
-      player.loadPlaylist?.(videos, 0, 0);
+      loadQueueAt(player, videos, 0, 0);
       setVideoId(videos[0] ?? "");
       setPosition({ index: 1, total: videos.length });
     } catch {
@@ -986,14 +1026,17 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
       const index = Math.max(0, target.getPlaylistIndex());
       const data = target.getVideoData();
       const fromPlaylist = playlist?.[index];
-      const fromQueue = videosRef.current[index];
+      const fromQueue = videosRef.current[queueIndexRef.current];
       const id = data.video_id || fromPlaylist || fromQueue || videosRef.current[0] || "";
+      const abs = id ? videosRef.current.indexOf(id) : -1;
+      const absoluteIndex = abs >= 0 ? abs : queueIndexRef.current;
+      queueIndexRef.current = absoluteIndex;
       setTrack(data.title ?? "");
       setVideoId(id);
-      setPosition({ index: index + 1, total: playlist?.length ?? videosRef.current.length });
+      setPosition({ index: absoluteIndex + 1, total: videosRef.current.length });
       const nextDuration = target.getDuration();
       if (nextDuration > 0) setDuration(nextDuration);
-      rememberTrack(index);
+      rememberTrack(absoluteIndex);
     };
 
     loadYouTubeApi()
@@ -1021,7 +1064,12 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
             const state = target.getPlayerState?.();
             if (state === api.PlayerState.PAUSED || state === api.PlayerState.ENDED || state === -1 || state === 5) {
               if (state === api.PlayerState.ENDED) {
-                target.nextVideo?.();
+                const all = videosRef.current;
+                if (all.length) {
+                  const next = (queueIndexRef.current + 1) % all.length;
+                  queueIndexRef.current = next;
+                  loadQueueAt(target, all, next, 0);
+                }
               } else {
                 target.playVideo?.();
               }
@@ -1087,9 +1135,10 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
                 event.target.unMute();
               }
 
-              // Always use loadPlaylist to auto-start playback immediately
+              // Cap playlist size — Hindi has 100+ IDs and YouTube silently fails
               try {
-                event.target.loadPlaylist?.(videos, startIndex, deepLink.start);
+                queueIndexRef.current = startIndex;
+                loadQueueAt(event.target, videos, startIndex, deepLink.start);
                 userInitiatedPlay = true;
               } catch {
                 /* ignore */
@@ -1158,12 +1207,22 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
                 setElapsed(t);
               }
 
-              // Auto-advance when a track ends
+              // Auto-advance when a track ends (use full queue, not capped YT playlist)
               if (state === api.PlayerState.ENDED && userInitiatedPlay) {
                 window.clearTimeout(resumeTimer);
                 resumeTimer = window.setTimeout(() => {
                   if (disposed) return;
-                  try { event.target.nextVideo?.(); } catch { /* ignore */ }
+                  try {
+                    const all = videosRef.current;
+                    if (!all.length) return;
+                    const next = (queueIndexRef.current + 1) % all.length;
+                    queueIndexRef.current = next;
+                    loadQueueAt(event.target, all, next, 0);
+                    window.setTimeout(() => {
+                      if (disposed) return;
+                      try { event.target.playVideo?.(); } catch { /* ignore */ }
+                    }, 500);
+                  } catch { /* ignore */ }
                 }, 400);
               }
 
@@ -1178,8 +1237,10 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
               errorCount++;
               if (errorCount > 8) {
                 try {
-                  const randomIdx = Math.floor(Math.random() * videos.length);
-                  event.target.loadPlaylist?.(videos, randomIdx, 0);
+                  const all = videosRef.current;
+                  const randomIdx = Math.floor(Math.random() * all.length);
+                  queueIndexRef.current = randomIdx;
+                  loadQueueAt(event.target, all, randomIdx, 0);
                   errorCount = 0;
                   window.setTimeout(() => {
                     if (disposed) return;
@@ -1201,7 +1262,11 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
                 resumeTimer = window.setTimeout(() => {
                   if (disposed) return;
                   try {
-                    event.target.nextVideo?.();
+                    const all = videosRef.current;
+                    if (!all.length) return;
+                    const next = (queueIndexRef.current + 1) % all.length;
+                    queueIndexRef.current = next;
+                    loadQueueAt(event.target, all, next, 0);
                     window.setTimeout(() => {
                       if (disposed) return;
                       try { event.target.playVideo?.(); } catch { /* ignore */ }
@@ -1318,14 +1383,22 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
 
   const skip = useCallback((direction: 1 | -1) => {
     const player = live(playerRef.current) || playerRef.current;
-    if (!player) return;
+    const videos = videosRef.current;
+    if (!player || !videos.length) return;
     userPausedRef.current = false;
     userWantsPlayRef.current = true;
     lockSync(0);
     setScrub(null);
+    const next = (queueIndexRef.current + direction + videos.length) % videos.length;
+    queueIndexRef.current = next;
     try {
-      if (direction === 1) player.nextVideo?.();
-      else player.previousVideo?.();
+      loadQueueAt(player, videos, next, 0);
+      setVideoId(videos[next] ?? "");
+      setPosition({ index: next + 1, total: videos.length });
+      window.setTimeout(() => {
+        const p = live(playerRef.current) || playerRef.current;
+        try { p?.playVideo?.(); } catch { /* ignore */ }
+      }, 400);
     } catch { /* ignore */ }
   }, []);
 
@@ -1338,18 +1411,17 @@ function PlaceDeck({ place, muted, onMutedChange, station, onStationChange, onLi
     lockSync(0);
     setScrub(null);
     setDuration(0);
+    queueIndexRef.current = index;
     try {
-      player.playVideoAt?.(index);
+      loadQueueAt(player, videos, index, 0);
+      setVideoId(videos[index] ?? "");
+      setPosition({ index: index + 1, total: videos.length });
+      window.setTimeout(() => {
+        const p = live(playerRef.current) || playerRef.current;
+        try { p?.playVideo?.(); } catch { /* ignore */ }
+      }, 400);
     } catch {
-      try {
-        player.loadPlaylist?.(videos, index, 0);
-        window.setTimeout(() => {
-          const p = live(playerRef.current) || playerRef.current;
-          try { p?.playVideo?.(); } catch { /* ignore */ }
-        }, 400);
-      } catch {
-        /* ignore */
-      }
+      /* ignore */
     }
     const url = new URL(window.location.href);
     url.searchParams.set("t", String(index));
